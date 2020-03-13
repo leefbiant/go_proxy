@@ -8,22 +8,30 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 )
 
-const BUFF_SIZE = 8192
-const HEAD_SIZE = 4
-const PACKET_SIZE = BUFF_SIZE - HEAD_SIZE
+var (
+	svr_addr string
+)
 
 func main() {
-	logFile, err := os.OpenFile("proxy_client.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
-	if err != nil {
-		panic(err)
+	//logFile, err := os.OpenFile("proxy_client.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
+	//if err != nil {
+	//	panic(err)
+	//}
+	//log.SetOutput(logFile) // 将文件设置为log输出的文件
+	//log.SetPrefix("[debug]")
+	//log.SetFlags(log.LstdFlags | log.Lshortfile)
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	svr_addr = os.Getenv("SVR_ADDR")
+	lis_port := os.Getenv("LIS_PORT")
+	port, _ := strconv.Atoi(lis_port)
+	if port < 1024 || port > 65530 {
+		port = 5700
 	}
-	log.SetOutput(logFile) // 将文件设置为log输出的文件
-	log.SetPrefix("[qSkipTool]")
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	l, err := net.Listen("tcp", ":5000")
+	log.Println("server strt listen port:", port, " svr addr:", svr_addr)
+	l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		log.Panic(err)
 	}
@@ -118,7 +126,7 @@ func ShakeHands(c net.Conn, privateKeyStr, publicKeyStr, aesKey *string) error {
 func client_forward(src net.Conn, dst net.Conn, aesKey string) {
 	defer src.Close()
 	defer dst.Close()
-	var b [BUFF_SIZE]byte
+	var b [BUFF_SIZE - 64]byte
 	cnt := 0
 	for {
 		n, err := src.Read(b[:])
@@ -170,14 +178,17 @@ func server_forward(src net.Conn, dst net.Conn, aesKey string) {
 			}
 		}
 		packet_len := BytesToInt(b[pos : pos+HEAD_SIZE])
-		if packet_len > PACKET_SIZE {
-			log.Println("error cnt:", cnt, " readbyte:", readbyte, " packet_len:", packet_len)
+		if pos+packet_len > PACKET_SIZE || packet_len <= 0 {
+			log.Println("error seq:", cnt, "session:", aesKey, " readbyte:", readbyte, " packet_len:", packet_len)
 			return
 		}
-		for readbyte < packet_len+HEAD_SIZE {
+		for {
+			if readbyte >= packet_len+HEAD_SIZE {
+				break
+			}
 			ret, err := src.Read(b[readbyte:])
 			if err != nil {
-				log.Println(err)
+				fmt.Println(err)
 				return
 			}
 			readbyte += ret
@@ -199,6 +210,9 @@ func server_forward(src net.Conn, dst net.Conn, aesKey string) {
 			b[i] = b[pos+i]
 		}
 		readbyte -= pos
+		if readbyte != 0 {
+			log.Println("WARING session:", aesKey, " seq:", cnt, " readbyte:", readbyte)
+		}
 		cnt++
 	}
 }
@@ -209,7 +223,7 @@ func handleClientRequest(client net.Conn) {
 	}
 	defer client.Close()
 
-	address := "127.0.0.1:6000"
+	address := svr_addr
 	//获得了请求的host和port，就开始拨号吧
 	server, err := net.Dial("tcp", address)
 	if err != nil {

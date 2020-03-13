@@ -12,6 +12,10 @@ import (
 	"math/big"
 )
 
+const BUFF_SIZE = 8192
+const HEAD_SIZE = 4
+const PACKET_SIZE = BUFF_SIZE - HEAD_SIZE
+
 func RsaEncrypt(origData []byte, publicKeyStr string) ([]byte, error) {
 	//解密pem格式的公钥
 	block, _ := pem.Decode([]byte(publicKeyStr))

@@ -1,0 +1,4 @@
+FROM alpine:latest
+WORKDIR /
+COPY proxy_server /
+CMD ["/proxy_server" ]

@@ -9,22 +9,25 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 )
 
-const BUFF_SIZE = 8192
-const HEAD_SIZE = 4
-const PACKET_SIZE = BUFF_SIZE - HEAD_SIZE
-
 func main() {
-	logFile, err := os.OpenFile("proxy_server.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
-	if err != nil {
-		panic(err)
-	}
-	log.SetOutput(logFile) // 将文件设置为log输出的文件
-	log.SetPrefix("[qSkipTool]")
+	//logFile, err := os.OpenFile("proxy_server.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
+	//if err != nil {
+	//	panic(err)
+	//}
+	//log.SetOutput(logFile) // 将文件设置为log输出的文件
+	//log.SetPrefix("[debug]")
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	l, err := net.Listen("tcp", ":6000")
+	lis_port := os.Getenv("LIS_PORT")
+	port, _ := strconv.Atoi(lis_port)
+	if port < 1024 || port > 65530 {
+		port = 6000
+	}
+	log.Println("server strt listen port:", port)
+	l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		log.Panic(err)
 	}
@@ -105,7 +108,7 @@ func client_forward(src net.Conn, dst net.Conn, aesKey string, session int) {
 func server_forward(src net.Conn, dst net.Conn, aesKey string) {
 	defer src.Close()
 	defer dst.Close()
-	var b [BUFF_SIZE]byte
+	var b [BUFF_SIZE - 64]byte
 	for {
 		n, err := src.Read(b[:])
 		if err != nil {
