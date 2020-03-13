@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -15,28 +17,35 @@ const HEAD_SIZE = 4
 const PACKET_SIZE = BUFF_SIZE - HEAD_SIZE
 
 func main() {
+	logFile, err := os.OpenFile("proxy_server.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
+	if err != nil {
+		panic(err)
+	}
+	log.SetOutput(logFile) // 将文件设置为log输出的文件
+	log.SetPrefix("[qSkipTool]")
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	l, err := net.Listen("tcp", ":6000")
 	if err != nil {
 		log.Panic(err)
 	}
-
+	session := 1
 	for {
 		client, err := l.Accept()
 		if err != nil {
 			log.Panic(err)
 		}
-
-		go handleClientRequest(client)
+		//client.SetNoDelay(false)
+		go handleClientRequest(client, session)
+		session += 1
 	}
 }
 
-func client_forward(src net.Conn, dst net.Conn) {
+func client_forward(src net.Conn, dst net.Conn, aesKey string, session int) {
 	defer src.Close()
 	defer dst.Close()
 	var b [BUFF_SIZE]byte
 	readbyte := 0
-	cnt := 0
+	cnt := 1
 	for {
 		pos := 0
 		for {
@@ -45,7 +54,7 @@ func client_forward(src net.Conn, dst net.Conn) {
 			}
 			ret, err := src.Read(b[readbyte:])
 			if err != nil {
-				log.Println(err)
+				//log.Println(err)
 				return
 			}
 			readbyte += ret
@@ -54,11 +63,14 @@ func client_forward(src net.Conn, dst net.Conn) {
 			}
 		}
 		packet_len := BytesToInt(b[pos : pos+HEAD_SIZE])
-		if packet_len > PACKET_SIZE {
-			log.Println("error cnt:", cnt, " readbyte:", readbyte, " packet_len:", packet_len)
+		if pos+packet_len > PACKET_SIZE || packet_len <= 0 {
+			log.Println("error cnt:", cnt, " pos:", pos, " readbyte:", readbyte, " packet_len:", packet_len)
 			return
 		}
-		for readbyte < packet_len+HEAD_SIZE {
+		for {
+			if readbyte >= packet_len+HEAD_SIZE {
+				break
+			}
 			ret, err := src.Read(b[readbyte:])
 			if err != nil {
 				fmt.Println(err)
@@ -67,48 +79,55 @@ func client_forward(src net.Conn, dst net.Conn) {
 			readbyte += ret
 		}
 		pos += HEAD_SIZE
-		writebyte, err := dst.Write(b[pos : pos+packet_len])
+		// 解密客户端的数据
+		decryptData, err := decryptAES(b[pos:pos+packet_len], []byte(aesKey))
 		if err != nil {
+			log.Fatalln("encryptAES failed:", err)
 			return
 		}
-		if writebyte != packet_len {
+		if _, err := dst.Write(decryptData[:]); err != nil {
 			return
 		}
+		log.Println("seq:", cnt, " session:", aesKey, " send server encrpy len:", packet_len, " origlen", len(string(decryptData)))
 		pos += packet_len
 		buf_len := readbyte - pos
 		for i := 0; i < buf_len; i++ {
 			b[i] = b[pos+i]
 		}
 		readbyte -= pos
+		if readbyte != 0 {
+			log.Println("WARING session:", aesKey, " cnt:", cnt, " readbyte:", readbyte)
+		}
 		cnt++
 	}
 }
 
-func server_forward(src net.Conn, dst net.Conn) {
+func server_forward(src net.Conn, dst net.Conn, aesKey string) {
 	defer src.Close()
 	defer dst.Close()
 	var b [BUFF_SIZE]byte
 	for {
-		n, err := src.Read(b[HEAD_SIZE:])
+		n, err := src.Read(b[:])
 		if err != nil {
-			//log.Println(errrc
+			//log.Println(err)
 			return
 		}
 		if n <= 0 {
 			continue
 		}
-		length_byte := IntToBytes(n)
-		for index := 0; index < HEAD_SIZE; index++ {
-			b[index] = length_byte[index]
-		}
-		packet_len := n
-		n += HEAD_SIZE
-		n, err = dst.Write(b[:n])
+		// 加密返回客户端
+		encryptData, err := encryptAES(b[:n], []byte(aesKey))
 		if err != nil {
-			//log.Println(err)
+			log.Println("encryptAES failed", err)
 			return
 		}
-		log.Println("write packet_len:", packet_len)
+		length_byte := IntToBytes(len(string(encryptData)))
+		if _, err = dst.Write(length_byte[:]); err != nil {
+			return
+		}
+		if _, err = dst.Write(encryptData[:]); err != nil {
+			return
+		}
 	}
 }
 
@@ -127,11 +146,77 @@ func BytesToInt(b []byte) int {
 	return int(x)
 }
 
-func handleClientRequest(client net.Conn) {
+func ShakeHands(c net.Conn, publicKey, aesKey *string) error {
+	var b [BUFF_SIZE]byte
+	readbyte := 0
+	pos := 0
+	for {
+		if readbyte > HEAD_SIZE {
+			break
+		}
+		ret, err := c.Read(b[readbyte:])
+		if err != nil {
+			log.Println(err)
+			return err
+		}
+		readbyte += ret
+		if readbyte < HEAD_SIZE {
+			continue
+		}
+	}
+	packet_len := BytesToInt(b[pos : pos+HEAD_SIZE])
+	log.Println("recv packet_len:", packet_len)
+	if packet_len > PACKET_SIZE {
+		log.Println("error readbyte:", readbyte, " packet_len:", packet_len)
+		return errors.New(fmt.Sprintf("packet_len err:", packet_len))
+	}
+	for readbyte < packet_len+HEAD_SIZE {
+		ret, err := c.Read(b[readbyte:])
+		if err != nil {
+			log.Println(err)
+			return err
+		}
+		readbyte += ret
+	}
+	pos += HEAD_SIZE
+	*publicKey = string(b[pos : pos+packet_len])
+	pos += packet_len
+	readbyte -= pos
+	if readbyte != 0 {
+		log.Println("err recv more byte")
+		return errors.New("err recv more byte")
+	}
+	*aesKey = GetRandomString(16)
+	ciphertext, err := RsaEncrypt([]byte(*aesKey), *publicKey)
+	if err != nil {
+		log.Println("RsaEncrypt failed:", err.Error())
+		return errors.New(fmt.Sprintf("RSA encryption failed"))
+	}
+	byte_length := IntToBytes(len(ciphertext))
+	var buffer bytes.Buffer
+	buffer.Write(byte_length)
+	buffer.Write([]byte(ciphertext))
+	bbyte_res := buffer.Bytes()
+	_, err = c.Write(bbyte_res[:])
+	if err != nil {
+		log.Println("write failed")
+		return errors.New(fmt.Sprintf("write failed"))
+	}
+	// log.Println("ShakeHands sucess easkey:", *aesKey, " buff len:", len(bbyte_res))
+	return nil
+}
+
+func handleClientRequest(client net.Conn, session int) {
 	if client == nil {
 		return
 	}
 	defer client.Close()
+	var publicKey, aesKey string
+	err := ShakeHands(client, &publicKey, &aesKey)
+	if err != nil {
+		log.Fatalln("ShakeHands failed")
+		return
+	}
 
 	var b [BUFF_SIZE]byte
 	n := 0
@@ -148,7 +233,6 @@ func handleClientRequest(client net.Conn) {
 		break
 	}
 	packet_len := BytesToInt(b[0:HEAD_SIZE])
-	// fmt.Println("packet_len:", packet_len, " n:", n)
 	for {
 		if n >= packet_len+HEAD_SIZE {
 			break
@@ -161,8 +245,13 @@ func handleClientRequest(client net.Conn) {
 		n += readbyte
 	}
 
+	decryptData, err := decryptAES(b[HEAD_SIZE:n], []byte(aesKey))
+	if err != nil {
+		log.Println("decryptAES failed", err)
+		return
+	}
 	var method, host, address string
-	fmt.Sscanf(string(b[HEAD_SIZE:]), "%s%s", &method, &host)
+	fmt.Sscanf(string(decryptData[:]), "%s%s", &method, &host)
 	hostPortURL, err := url.Parse(host)
 	if err != nil {
 		log.Println(err)
@@ -185,25 +274,28 @@ func handleClientRequest(client net.Conn) {
 		log.Println(err)
 		return
 	}
+	// server.SetNoDelay(false)
+	log.Println("conn server:", address, " sucess")
 	defer server.Close()
 	if method == "CONNECT" {
-		res := "HTTP/1.1 200 Connection established\r\n\r\n"
-		byte_length := IntToBytes(len(res))
-		var buffer bytes.Buffer
-		buffer.Write(byte_length)
-		buffer.Write([]byte(res))
-		bbyte_res := buffer.Bytes()
-		n, err = client.Write(bbyte_res[:])
+		context := "HTTP/1.1 200 Connection established\r\n\r\n"
+		res, err := encryptAES([]byte(context), []byte(aesKey))
 		if err != nil {
+			log.Fatalln("encryptAES failed", err)
+			return
+		}
+		byte_length := IntToBytes(len(string(res)))
+		if _, err = client.Write(byte_length[:]); err != nil {
+			return
+		}
+		if _, err = client.Write(res[:]); err != nil {
 			return
 		}
 	} else {
-		server.Write(b[:n])
+		server.Write(decryptData[:])
 	}
 	//进行转发
-	// go io.Copy(server, client)
-	// io.Copy(client, server)
-	go client_forward(client, server)
-	server_forward(server, client)
+	go client_forward(client, server, aesKey, session)
+	server_forward(server, client, aesKey)
 	log.Println("close:", address)
 }
