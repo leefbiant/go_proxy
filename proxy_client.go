@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -9,6 +10,9 @@ import (
 	"net"
 	"os"
 	"strconv"
+
+	"github.com/xtaci/kcp-go/v5"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 var (
@@ -16,13 +20,6 @@ var (
 )
 
 func main() {
-	//logFile, err := os.OpenFile("proxy_client.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
-	//if err != nil {
-	//	panic(err)
-	//}
-	//log.SetOutput(logFile) // 将文件设置为log输出的文件
-	//log.SetPrefix("[debug]")
-	//log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	svr_addr = os.Getenv("SVR_ADDR")
 	lis_port := os.Getenv("LIS_PORT")
@@ -61,7 +58,8 @@ func BytesToInt(b []byte) int {
 	return int(x)
 }
 
-func ShakeHands(c net.Conn, privateKeyStr, publicKeyStr, aesKey *string) error {
+// func ShakeHands(c net.Conn, privateKeyStr, publicKeyStr, aesKey *string) error {
+func ShakeHands(c *kcp.UDPSession, privateKeyStr, publicKeyStr, aesKey *string) error {
 	err := GenRsaKey(1024, privateKeyStr, publicKeyStr)
 	if err != nil {
 		log.Fatalln("GenRsaKey failed")
@@ -123,7 +121,7 @@ func ShakeHands(c net.Conn, privateKeyStr, publicKeyStr, aesKey *string) error {
 	log.Println("ShakeHands sucess easkey:", *aesKey)
 	return nil
 }
-func client_forward(src net.Conn, dst net.Conn, aesKey string) {
+func client_forward(src net.Conn, dst *kcp.UDPSession, aesKey string) {
 	defer src.Close()
 	defer dst.Close()
 	var b [BUFF_SIZE - 64]byte
@@ -225,7 +223,12 @@ func handleClientRequest(client net.Conn) {
 
 	address := svr_addr
 	//获得了请求的host和port，就开始拨号吧
-	server, err := net.Dial("tcp", address)
+	key := pbkdf2.Key([]byte("proxy pass"), []byte("proxy salt"), 1024, 32, sha1.New)
+	block, _ := kcp.NewAESBlockCrypt(key)
+
+	log.Println("recv conn start connect svr:", address)
+	// server, err := net.Dial("tcp", address)
+	server, err := kcp.DialWithOptions(address, block, 10, 3)
 	if err != nil {
 		log.Println(err)
 		return

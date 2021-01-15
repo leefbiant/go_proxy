@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,29 +12,34 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/xtaci/kcp-go/v5"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 func main() {
-	//logFile, err := os.OpenFile("proxy_server.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
-	//if err != nil {
-	//	panic(err)
-	//}
-	//log.SetOutput(logFile) // 将文件设置为log输出的文件
-	//log.SetPrefix("[debug]")
+
+	key := pbkdf2.Key([]byte("proxy pass"), []byte("proxy salt"), 1024, 32, sha1.New)
+	block, _ := kcp.NewAESBlockCrypt(key)
+
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	lis_port := os.Getenv("LIS_PORT")
+	//svr_addr := os.Getenv("SVR_ADDR")
+	// use_kcp := os.Getenv("USE_KCP")
 	port, _ := strconv.Atoi(lis_port)
 	if port < 1024 || port > 65530 {
 		port = 6000
 	}
 	log.Println("server strt listen port:", port)
-	l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	// l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	l, err := kcp.ListenWithOptions(fmt.Sprintf(":%d", port), block, 10, 3)
 	if err != nil {
 		log.Panic(err)
 	}
 	session := 1
 	for {
-		client, err := l.Accept()
+		//client, err := l.Accept()
+		client, err := l.AcceptKCP()
 		if err != nil {
 			log.Panic(err)
 		}
@@ -43,7 +49,7 @@ func main() {
 	}
 }
 
-func client_forward(src net.Conn, dst net.Conn, aesKey string, session int) {
+func client_forward(src *kcp.UDPSession, dst net.Conn, aesKey string, session int) {
 	defer src.Close()
 	defer dst.Close()
 	var b [BUFF_SIZE]byte
@@ -105,7 +111,7 @@ func client_forward(src net.Conn, dst net.Conn, aesKey string, session int) {
 	}
 }
 
-func server_forward(src net.Conn, dst net.Conn, aesKey string) {
+func server_forward(src net.Conn, dst *kcp.UDPSession, aesKey string) {
 	defer src.Close()
 	defer dst.Close()
 	var b [BUFF_SIZE - 64]byte
@@ -209,7 +215,8 @@ func ShakeHands(c net.Conn, publicKey, aesKey *string) error {
 	return nil
 }
 
-func handleClientRequest(client net.Conn, session int) {
+// func handleClientRequest(client net.Conn, session int) {
+func handleClientRequest(client *kcp.UDPSession, session int) {
 	if client == nil {
 		return
 	}
